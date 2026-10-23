@@ -2,13 +2,19 @@ import re
 from datetime import datetime
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 
 from app.gemini_service import GeminiService
+from app.face_recognition import (
+    MAX_IMAGE_BYTES as MAX_FACE_IMAGE_BYTES,
+    FaceRecognitionError,
+    FaceRecognitionStore,
+)
+from app.config import settings
 from app.hardware import hardware
 from app.reminders import reminder_store
 
@@ -16,6 +22,7 @@ app = FastAPI(title="VIVA Home Companion")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 gemini_service = GeminiService()
+face_store = FaceRecognitionStore(settings.face_db_file, settings.face_match_threshold)
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
@@ -38,6 +45,10 @@ class ImageAnalysisRequest(BaseModel):
     prompt: str | None = Field(default="Describe this image in a concise and useful way.", max_length=500)
 
 
+class FaceFrameRequest(BaseModel):
+    image_data: str = Field(..., min_length=1, max_length=7_000_000)
+
+
 class HardwareConnectRequest(BaseModel):
     port: str = Field(..., pattern=r"(?i)^COM[1-9]\d*$")
     baud: int = Field(default=9600, ge=1200, le=115200)
@@ -48,6 +59,7 @@ class HardwareConnectRequest(BaseModel):
 async def startup_event() -> None:
     reminder_store.initialize()
     reminder_store.start_background_loop()
+    await run_in_threadpool(face_store.initialize)
     if hardware.mode != "simulation" and hardware.port:
         await run_in_threadpool(hardware.connect_configured)
     else:
@@ -76,6 +88,61 @@ def api_status() -> dict[str, Any]:
         "simulation": hardware_status["simulation"],
         "timestamp": datetime.now().isoformat(),
     }
+
+
+def require_local_face_access(request: Request) -> None:
+    if request.client is None or request.client.host not in {"127.0.0.1", "::1"}:
+        raise HTTPException(
+            status_code=403,
+            detail="People Recognition is available only from this computer. Open VIVA at http://localhost:8000.",
+        )
+
+
+@app.get("/api/faces/people")
+async def list_enrolled_people(request: Request) -> dict[str, Any]:
+    require_local_face_access(request)
+    people = await run_in_threadpool(face_store.list_people)
+    return {"ok": True, "items": people}
+
+
+@app.post("/api/faces/enroll")
+async def enroll_person(
+    request: Request,
+    name: str = Form(..., min_length=1, max_length=50),
+    image: UploadFile = File(...),
+) -> dict[str, Any]:
+    require_local_face_access(request)
+    if image.content_type not in {"image/jpeg", "image/png", "image/webp"}:
+        raise HTTPException(status_code=415, detail="Choose a JPEG, PNG, or WebP image.")
+    image_bytes = await image.read(MAX_FACE_IMAGE_BYTES + 1)
+    await image.close()
+    try:
+        person = await run_in_threadpool(face_store.enroll, image_bytes, name)
+    except FaceRecognitionError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return {"ok": True, "person": person, "message": f"{person['name']} was enrolled on this computer."}
+
+
+@app.delete("/api/faces/people/{person_id}")
+async def delete_enrolled_person(person_id: int, request: Request) -> dict[str, Any]:
+    require_local_face_access(request)
+    try:
+        await run_in_threadpool(face_store.delete_person, person_id)
+    except FaceRecognitionError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return {"ok": True, "message": "Enrolled face data was deleted."}
+
+
+@app.post("/api/faces/recognize")
+async def recognize_camera_frame(
+    request: Request,
+    payload: FaceFrameRequest,
+) -> dict[str, Any]:
+    require_local_face_access(request)
+    try:
+        return await run_in_threadpool(face_store.recognize, payload.image_data)
+    except FaceRecognitionError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 @app.get("/api/bluetooth/devices")

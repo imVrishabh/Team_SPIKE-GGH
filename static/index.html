@@ -97,6 +97,52 @@
           </div>
           <canvas id="visionCanvas" class="hidden" aria-hidden="true"></canvas>
         </section>
+
+        <section class="panel people-panel">
+          <div class="vision-heading">
+            <div><p class="eyebrow">PRIVATE · ON THIS COMPUTER</p><h2>People Recognition</h2></div>
+            <span class="vision-local-badge">Local face matching</span>
+          </div>
+          <p class="people-intro">Enroll people you know, then let VIVA compare faces from your live camera. Recognition is approximate and works best with clear, front-facing images.</p>
+          <div class="people-layout">
+            <div class="enrollment-column">
+              <form id="personEnrollmentForm" class="enrollment-form">
+                <label for="personNameInput">Person name</label>
+                <input id="personNameInput" name="name" type="text" maxlength="50" autocomplete="off" placeholder="e.g. Vrishabh" required />
+                <label for="personImageInput">Photo (JPEG, PNG, or WebP; max 5 MB)</label>
+                <input id="personImageInput" name="image" type="file" accept="image/jpeg,image/png,image/webp" required />
+                <div id="personPreviewWrap" class="person-preview hidden">
+                  <img id="personImagePreview" alt="Selected enrollment photo preview" />
+                </div>
+                <button id="savePersonBtn" class="primary-btn" type="submit">Save Person</button>
+              </form>
+              <div class="enrolled-people">
+                <h3>Enrolled people</h3>
+                <ul id="enrolledPeopleList" class="enrolled-people-list"></ul>
+                <p id="enrolledPeopleEmpty" class="empty-people">No one enrolled yet. Add one clear photo to get started.</p>
+              </div>
+            </div>
+            <div class="recognition-column">
+              <div class="recognition-camera-stage">
+                <video id="recognitionVideo" autoplay playsinline muted class="hidden"></video>
+                <canvas id="recognitionOverlay" aria-hidden="true"></canvas>
+                <div id="recognitionCameraPlaceholder" class="camera-placeholder">
+                  <span class="camera-placeholder-icon">◎</span>
+                  <strong>Recognition camera is off</strong>
+                  <span>Start recognition when you are ready. Frames are processed by this computer only.</span>
+                </div>
+              </div>
+              <div id="recognitionMessage" class="vision-message" role="status" aria-live="polite">Recognition is stopped. Your camera is not active.</div>
+              <div class="camera-actions recognition-actions">
+                <button id="startRecognitionBtn" class="primary-btn" type="button">Start Recognition</button>
+                <button id="stopRecognitionBtn" class="secondary-btn" type="button" disabled>Stop Recognition</button>
+                <label class="greeting-toggle"><input id="voiceGreetingToggle" type="checkbox" checked /> Voice greetings</label>
+              </div>
+            </div>
+          </div>
+          <p class="privacy-note">Privacy: recognition frames are sent only to this computer's local FastAPI app, never to Gemini or an external service. The original upload is discarded after processing. Normalized face samples and names are stored locally in <code>data/face_recognition.db</code>; delete an enrollment to remove its data. Do not expose this app to untrusted networks.</p>
+          <canvas id="recognitionFrameCanvas" class="hidden" aria-hidden="true"></canvas>
+        </section>
       </main>
     </div>
 
@@ -179,4 +225,3 @@
     <script src="/static/app.js"></script>
   </body>
 </html>
-

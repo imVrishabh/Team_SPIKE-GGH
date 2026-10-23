@@ -10,6 +10,7 @@ VIVA is a smart home companion that lets you control a bedroom LED, create remin
 - Speaks responses using browser speech synthesis
 - Accepts voice commands in browsers that support Web Speech API
 - Estimates the most common colour in the live camera's central region locally in the browser
+- Enrolls named people and recognizes faces locally with OpenCV; camera frames are not sent to Gemini
 - Captures a snapshot from your phone camera and optionally describes it with Gemini on explicit request
 - Works in simulation mode when hardware is disconnected
 
@@ -23,11 +24,13 @@ VIVA is a smart home companion that lets you control a bedroom LED, create remin
    `.venv\Scripts\activate`
 5. Install dependencies:
    `pip install -r requirements.txt`
-6. Copy `.env.example` to `.env` and fill in the values.
+6. If `.env` does not exist, copy `.env.example` to `.env` and fill in the values. Keep an existing `.env`; do not overwrite it.
 7. Start the app:
-   `uvicorn app.main:app --host 0.0.0.0 --port 8000`
+   `uvicorn app.main:app --host 127.0.0.1 --port 8000`
    or use the provided `run.bat` wrapper.
 8. Open `http://localhost:8000/` in the browser on the laptop.
+
+VIVA binds to this computer only by default. Do not expose it to a LAN or the public internet without adding appropriate access controls.
 
 ## Gemini API setup
 
@@ -46,7 +49,34 @@ VIVA is a smart home companion that lets you control a bedroom LED, create remin
 - `ARDUINO_PORT`: COM port for USB or paired HC-05 module
 - `ARDUINO_BAUD`: default `9600`
 - `REMINDER_DB_PATH`: path to the SQLite database
+- `FACE_DB_PATH`: local SQLite store for enrolled names and normalized face samples; default `data/face_recognition.db`
+- `FACE_MATCH_THRESHOLD`: LBPH maximum distance for accepting a match (default `75`; lower is stricter, range `10`–`150`)
 - `TIMEZONE`: default `Asia/Kolkata`
+
+## People Recognition (local face enrollment)
+
+Open VIVA on the laptop at **http://localhost:8000/**. Face enrollment and recognition endpoints accept requests only from this computer; they are intentionally unavailable when the dashboard is opened from another device or through a LAN address.
+
+1. In **People Recognition**, enter a name (for the demo, `Vrishabh`) and select one clear JPEG, PNG, or WebP photo of that person (maximum 5 MB).
+2. Review the preview and select **Save Person**. VIVA requires exactly one detectable face; it reports a useful error for no face, multiple faces, unsupported files, and duplicate names.
+3. Select **Start Recognition** and allow camera access. Detected faces receive a box and a label. Faces that do not pass the configured match threshold are labelled **Unknown Person**.
+4. Voice greetings are enabled by default. Turn off **Voice greetings** to mute them; VIVA greets only on a newly recognized appearance and applies a 30-second per-person cooldown. Stop Recognition to release the camera.
+5. Use **Delete** beside an enrolled person to remove that name and its face sample from local storage.
+
+### Recognition method, limits, and privacy
+
+Recognition uses OpenCV's CPU-based Haar face detector and LBPH face recognizer from `opencv-contrib-python-headless`. It needs no GPU, external API, or model download. The first dependency install downloads a sizeable OpenCV wheel (tens of megabytes). If your environment has the regular `opencv-python` package, remove it before installing contrib to avoid two distributions writing the same `cv2` module:
+
+```powershell
+python -m pip uninstall opencv-python
+python -m pip install -r requirements.txt
+```
+
+The one-photo LBPH setup is a lightweight hackathon demo, not a modern deep-embedding system. It can be sensitive to pose, expression, lighting, image quality, and similar-looking people; it is not suitable for security or consequential decisions. Add clear samples under varied conditions and tune `FACE_MATCH_THRESHOLD` locally if needed. LBPH distance is not a calibrated probability: a lower value is a closer match. The default threshold is a starting point, not an accuracy guarantee.
+
+The original enrollment upload is processed in memory and discarded. VIVA stores the person's name and a normalized grayscale face sample (the local recognition representation) in `data/face_recognition.db`; deleting an enrollment also deletes that sample and rebuilds the in-memory matcher. Live frames are downscaled and sent about once per second to this computer's FastAPI backend only. They are not stored, sent to Gemini, or sent to an external service. The local database is ignored by Git. Do not expose VIVA to untrusted networks; the face API additionally enforces loopback-only access.
+
+Camera permissions require a supported browser and a secure context. Use `http://localhost:8000/` on the laptop, not the laptop's LAN IP, for this feature. If no camera is detected, allow access in browser settings, close other camera applications, and retry. If a clear photo is rejected, use a brighter, front-facing image with only one face.
 
 ## Arduino wiring and upload
 

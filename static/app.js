@@ -247,8 +247,11 @@ async function disconnectDevice() {
 }
 
 async function fetchJson(url, options = {}) {
+  const headers = options.body instanceof FormData
+    ? {}
+    : { 'Content-Type': 'application/json' };
   const response = await fetch(url, {
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     ...options,
   });
   const data = await response.json();
@@ -660,6 +663,303 @@ document.getElementById('captureBtn').addEventListener('click', capturePhoto);
 document.getElementById('analyzeBtn').addEventListener('click', analyzeImage);
 window.addEventListener('pagehide', releaseCamera);
 
+const personEnrollmentForm = document.getElementById('personEnrollmentForm');
+const personNameInput = document.getElementById('personNameInput');
+const personImageInput = document.getElementById('personImageInput');
+const personImagePreview = document.getElementById('personImagePreview');
+const enrolledPeopleList = document.getElementById('enrolledPeopleList');
+const recognitionVideo = document.getElementById('recognitionVideo');
+const recognitionOverlay = document.getElementById('recognitionOverlay');
+const recognitionFrameCanvas = document.getElementById('recognitionFrameCanvas');
+const recognitionMessage = document.getElementById('recognitionMessage');
+const voiceGreetingToggle = document.getElementById('voiceGreetingToggle');
+let personPreviewUrl = null;
+let recognitionStream = null;
+let recognitionActive = false;
+let recognitionRequestInFlight = false;
+let recognitionTimer = null;
+let recognitionAbortController = null;
+let recognitionGeneration = 0;
+let currentRecognizedName = null;
+const personGreetingTimes = new Map();
+const GREETING_COOLDOWN_MS = 30_000;
+
+function setRecognitionMessage(message, level = 'info') {
+  recognitionMessage.textContent = message;
+  recognitionMessage.className = `vision-message ${level}`;
+}
+
+function showPersonPreview(file) {
+  if (personPreviewUrl) {
+    URL.revokeObjectURL(personPreviewUrl);
+    personPreviewUrl = null;
+  }
+  const previewWrap = document.getElementById('personPreviewWrap');
+  if (!file) {
+    previewWrap.classList.add('hidden');
+    personImagePreview.removeAttribute('src');
+    return;
+  }
+  if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type) || file.size > 5 * 1024 * 1024) {
+    setRecognitionMessage('Choose a JPEG, PNG, or WebP image no larger than 5 MB.', 'error');
+    personImageInput.value = '';
+    previewWrap.classList.add('hidden');
+    return;
+  }
+  personPreviewUrl = URL.createObjectURL(file);
+  personImagePreview.src = personPreviewUrl;
+  previewWrap.classList.remove('hidden');
+}
+
+async function refreshEnrolledPeople() {
+  const result = await fetchJson('/api/faces/people');
+  enrolledPeopleList.replaceChildren();
+  const empty = document.getElementById('enrolledPeopleEmpty');
+  empty.classList.toggle('hidden', result.items.length > 0);
+  result.items.forEach((person) => {
+    const item = document.createElement('li');
+    item.className = 'enrolled-person';
+    const name = document.createElement('span');
+    name.className = 'enrolled-person-name';
+    name.textContent = person.name;
+    const remove = document.createElement('button');
+    remove.className = 'delete-person-btn';
+    remove.type = 'button';
+    remove.textContent = 'Delete';
+    remove.setAttribute('aria-label', `Delete ${person.name}`);
+    remove.addEventListener('click', async () => {
+      remove.disabled = true;
+      try {
+        const response = await fetchJson(`/api/faces/people/${person.id}`, { method: 'DELETE' });
+        await refreshEnrolledPeople();
+        setRecognitionMessage(response.message, 'success');
+        addLog(`Deleted local face enrollment for ${person.name}.`);
+      } catch (error) {
+        remove.disabled = false;
+        setRecognitionMessage(error.message, 'error');
+      }
+    });
+    item.append(name, remove);
+    enrolledPeopleList.append(item);
+  });
+}
+
+personImageInput.addEventListener('change', () => showPersonPreview(personImageInput.files[0]));
+
+personEnrollmentForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const file = personImageInput.files[0];
+  const name = personNameInput.value.trim();
+  if (!name || !file) {
+    setRecognitionMessage('Enter a name and choose a photo before saving.', 'error');
+    return;
+  }
+  if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type) || file.size > 5 * 1024 * 1024) {
+    setRecognitionMessage('Choose a JPEG, PNG, or WebP image no larger than 5 MB.', 'error');
+    return;
+  }
+  const saveButton = document.getElementById('savePersonBtn');
+  saveButton.disabled = true;
+  saveButton.textContent = 'Checking photo…';
+  setRecognitionMessage('Detecting one face and saving its local recognition sample…');
+  try {
+    const body = new FormData();
+    body.append('name', name);
+    body.append('image', file);
+    const result = await fetchJson('/api/faces/enroll', { method: 'POST', body });
+    await refreshEnrolledPeople();
+    personEnrollmentForm.reset();
+    showPersonPreview(null);
+    setRecognitionMessage(`${result.person.name} was enrolled. The original photo was not retained.`, 'success');
+    addLog(`Enrolled ${result.person.name} for local face recognition.`, 'success');
+  } catch (error) {
+    setRecognitionMessage(error.message, 'error');
+  } finally {
+    saveButton.disabled = false;
+    saveButton.textContent = 'Save Person';
+  }
+});
+
+function drawRecognitionBoxes(faces, frameWidth, frameHeight) {
+  const bounds = recognitionOverlay.getBoundingClientRect();
+  const pixelRatio = window.devicePixelRatio || 1;
+  recognitionOverlay.width = Math.max(1, Math.round(bounds.width * pixelRatio));
+  recognitionOverlay.height = Math.max(1, Math.round(bounds.height * pixelRatio));
+  const context = recognitionOverlay.getContext('2d');
+  if (!context) return;
+  context.scale(pixelRatio, pixelRatio);
+  context.clearRect(0, 0, bounds.width, bounds.height);
+  if (!frameWidth || !frameHeight) return;
+
+  const scale = Math.min(bounds.width / frameWidth, bounds.height / frameHeight);
+  const offsetX = (bounds.width - frameWidth * scale) / 2;
+  const offsetY = (bounds.height - frameHeight * scale) / 2;
+  context.font = '600 14px Inter, Arial, sans-serif';
+  context.lineWidth = 3;
+  faces.forEach((face) => {
+    const { x, y, width, height } = face.box;
+    const left = offsetX + x * scale;
+    const top = offsetY + y * scale;
+    const boxWidth = width * scale;
+    const boxHeight = height * scale;
+    const color = face.recognized ? '#3ddc97' : '#fbbf24';
+    const label = face.name;
+    context.strokeStyle = color;
+    context.strokeRect(left, top, boxWidth, boxHeight);
+    const labelWidth = context.measureText(label).width + 16;
+    const labelTop = Math.max(0, top - 25);
+    context.fillStyle = color;
+    context.fillRect(left, labelTop, labelWidth, 23);
+    context.fillStyle = '#07111f';
+    context.fillText(label, left + 8, labelTop + 16);
+  });
+}
+
+function updateVoiceGreeting(faceName) {
+  const previousName = currentRecognizedName;
+  currentRecognizedName = faceName;
+  if (!faceName || !voiceGreetingToggle.checked || faceName === previousName) return;
+  const now = Date.now();
+  const lastGreeting = personGreetingTimes.get(faceName) || 0;
+  if (now - lastGreeting < GREETING_COOLDOWN_MS) return;
+  personGreetingTimes.set(faceName, now);
+  speakText(`Hello, ${faceName}!`);
+}
+
+async function recognizeNextFrame(generation = recognitionGeneration) {
+  if (!recognitionActive || recognitionRequestInFlight || generation !== recognitionGeneration) return;
+  recognitionRequestInFlight = true;
+  recognitionAbortController = new AbortController();
+  try {
+    const videoWidth = recognitionVideo.videoWidth;
+    const videoHeight = recognitionVideo.videoHeight;
+    if (!videoWidth || !videoHeight) throw new Error('Waiting for the camera preview to be ready.');
+    const scale = Math.min(1, 480 / videoWidth);
+    const width = Math.max(1, Math.round(videoWidth * scale));
+    const height = Math.max(1, Math.round(videoHeight * scale));
+    recognitionFrameCanvas.width = width;
+    recognitionFrameCanvas.height = height;
+    const context = recognitionFrameCanvas.getContext('2d');
+    if (!context) throw new Error('Could not prepare a frame for local recognition.');
+    context.drawImage(recognitionVideo, 0, 0, width, height);
+    const imageData = recognitionFrameCanvas.toDataURL('image/jpeg', 0.68);
+    const result = await fetchJson('/api/faces/recognize', {
+      method: 'POST',
+      body: JSON.stringify({ image_data: imageData }),
+      signal: recognitionAbortController.signal,
+    });
+    drawRecognitionBoxes(result.faces, result.frame_width, result.frame_height);
+    const recognized = result.faces.find((face) => face.recognized);
+    updateVoiceGreeting(recognized ? recognized.name : null);
+    if (recognized) {
+      setRecognitionMessage(`Recognized ${recognized.name}. Similarity is approximate; check the label before relying on it.`, 'success');
+    } else if (result.faces.length) {
+      setRecognitionMessage('Unknown Person. No enrolled match met the configured similarity threshold.', 'info');
+    } else {
+      setRecognitionMessage('No face detected. Face the camera in clear, even lighting.', 'info');
+    }
+  } catch (error) {
+    if (generation === recognitionGeneration && recognitionActive) {
+      stopRecognition(`Recognition stopped: ${error.message}`, 'error');
+    }
+    return;
+  } finally {
+    if (generation === recognitionGeneration) {
+      recognitionRequestInFlight = false;
+      recognitionAbortController = null;
+    }
+  }
+  if (recognitionActive && generation === recognitionGeneration) {
+    recognitionTimer = window.setTimeout(() => recognizeNextFrame(generation), 900);
+  }
+}
+
+async function startRecognition() {
+  if (recognitionActive) return;
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    setRecognitionMessage('Camera access requires a supported browser and HTTPS or localhost.', 'error');
+    return;
+  }
+  const startButton = document.getElementById('startRecognitionBtn');
+  startButton.disabled = true;
+  try {
+    setRecognitionMessage('Requesting camera permission…');
+    recognitionStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'user' }, width: { ideal: 640 }, height: { ideal: 480 } },
+      audio: false,
+    });
+    recognitionVideo.srcObject = recognitionStream;
+    await recognitionVideo.play();
+    const generation = ++recognitionGeneration;
+    recognitionActive = true;
+    document.getElementById('recognitionCameraPlaceholder').classList.add('hidden');
+    recognitionVideo.classList.remove('hidden');
+    document.getElementById('stopRecognitionBtn').disabled = false;
+    setRecognitionMessage('Recognition is active. Frames are processed on this computer only.', 'success');
+    recognitionStream.getVideoTracks().forEach((track) => {
+      track.addEventListener('ended', () => {
+        if (recognitionActive) stopRecognition('The camera stream ended. Start recognition again to retry.', 'error');
+      }, { once: true });
+    });
+    recognizeNextFrame(generation);
+  } catch (error) {
+    stopRecognition(
+      error.name === 'NotAllowedError' || error.name === 'SecurityError'
+        ? 'Camera permission was denied. Allow camera access in browser settings and try again.'
+        : error.name === 'NotFoundError' || error.name === 'DevicesNotFoundError'
+          ? 'No camera was found on this device.'
+          : error.name === 'NotReadableError' || error.name === 'TrackStartError'
+            ? 'The camera is in use or could not start. Close other camera apps and retry.'
+            : `Could not start recognition: ${error.message || 'unknown camera error'}`,
+      'error',
+    );
+  } finally {
+    startButton.disabled = recognitionActive;
+  }
+}
+
+function stopRecognition(message = 'Recognition stopped. The camera has been released.', level = 'info') {
+  recognitionGeneration += 1;
+  recognitionActive = false;
+  if (recognitionAbortController) {
+    recognitionAbortController.abort();
+    recognitionAbortController = null;
+  }
+  recognitionRequestInFlight = false;
+  if (recognitionTimer !== null) {
+    window.clearTimeout(recognitionTimer);
+    recognitionTimer = null;
+  }
+  if (recognitionStream) {
+    recognitionStream.getTracks().forEach((track) => track.stop());
+    recognitionStream = null;
+  }
+  recognitionVideo.srcObject = null;
+  recognitionVideo.classList.add('hidden');
+  document.getElementById('recognitionCameraPlaceholder').classList.remove('hidden');
+  document.getElementById('startRecognitionBtn').disabled = false;
+  document.getElementById('stopRecognitionBtn').disabled = true;
+  const context = recognitionOverlay.getContext('2d');
+  if (context) context.clearRect(0, 0, recognitionOverlay.width, recognitionOverlay.height);
+  currentRecognizedName = null;
+  setRecognitionMessage(message, level);
+}
+
+document.getElementById('startRecognitionBtn').addEventListener('click', startRecognition);
+document.getElementById('stopRecognitionBtn').addEventListener('click', () => stopRecognition());
+voiceGreetingToggle.addEventListener('change', () => {
+  currentRecognizedName = null;
+  setRecognitionMessage(voiceGreetingToggle.checked ? 'Voice greetings are enabled.' : 'Voice greetings are disabled.');
+});
+
+refreshEnrolledPeople().catch((error) => {
+  setRecognitionMessage(`Could not load local enrollments: ${error.message}`, 'error');
+});
+window.addEventListener('pagehide', () => {
+  stopRecognition();
+  if (personPreviewUrl) URL.revokeObjectURL(personPreviewUrl);
+});
+
 if ('Notification' in window) {
   Notification.requestPermission().catch(() => {});
 }
@@ -669,4 +969,3 @@ setInterval(refreshReminders, 5000);
 scanSerialPorts();
 refreshStatus();
 refreshReminders();
-
