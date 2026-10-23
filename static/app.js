@@ -347,3 +347,4 @@ setInterval(refreshStatus, 10000);
 setInterval(refreshReminders, 5000);
 refreshStatus();
 refreshReminders();
+
