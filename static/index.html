@@ -18,6 +18,7 @@
           <div id="gemini-pill" class="pill"><span class="dot"></span> Gemini</div>
           <div id="arduino-pill" class="pill"><span class="dot"></span> Arduino</div>
           <div id="hardware-badge" class="pill simulation"><span class="dot"></span> SIMULATION MODE</div>
+          <button id="connectDeviceBtn" class="primary-btn" type="button">Connect Device</button>
         </div>
       </header>
 
@@ -56,22 +57,125 @@
           <ul id="activityLog" class="activity-log"></ul>
         </section>
 
-        <section class="panel camera-panel">
-          <h2>Camera</h2>
-          <video id="cameraVideo" autoplay playsinline muted></video>
-          <div class="capture-preview hidden">
-            <img id="cameraPreview" alt="Captured preview" />
+        <section class="panel camera-panel vision-panel">
+          <div class="vision-heading">
+            <div><p class="eyebrow">LOCAL CAMERA TOOLS</p><h2>AI Vision</h2></div>
+            <span class="vision-local-badge">Colour detection stays on this device</span>
           </div>
+          <div class="vision-camera-stage">
+            <video id="cameraVideo" autoplay playsinline muted class="hidden"></video>
+            <div id="cameraPlaceholderMessage" class="camera-placeholder">
+              <span class="camera-placeholder-icon">◉</span>
+              <strong>Camera is off</strong>
+              <span>Open the camera to preview and identify a colour.</span>
+            </div>
+            <span id="cameraLiveBadge" class="camera-live-badge hidden"><i></i> LIVE</span>
+          </div>
+          <div id="visionMessage" class="vision-message" role="status" aria-live="polite">Camera access starts only when you click Open Camera.</div>
           <div class="camera-actions">
             <button id="openCameraBtn" class="secondary-btn" type="button">Open Camera</button>
-            <button id="captureBtn" class="secondary-btn" type="button">Capture</button>
-            <button id="analyzeBtn" class="primary-btn" type="button">Describe Image</button>
+            <button id="closeCameraBtn" class="secondary-btn" type="button" disabled>Close Camera</button>
+            <button id="identifyColourBtn" class="primary-btn" type="button" disabled>Identify Colour</button>
           </div>
+          <div id="colourResult" class="colour-result hidden" aria-live="polite">
+            <div id="colourSwatch" class="colour-swatch"></div>
+            <div class="colour-result-copy">
+              <span class="result-eyebrow">CENTRAL REGION COLOUR</span>
+              <strong id="colourName">—</strong>
+              <span id="colourDetails"></span>
+            </div>
+            <button id="speakColourBtn" class="secondary-btn speak-colour-btn" type="button">Speak Result</button>
+          </div>
+          <p class="vision-disclaimer">Colour estimates can vary with lighting, shadows, reflections, and camera white balance. For multi-colour scenes, VIVA reports the most common colour in the centre region.</p>
+          <div class="vision-divider"><span>Optional AI image description</span></div>
+          <div class="camera-actions">
+            <button id="captureBtn" class="secondary-btn" type="button" disabled>Capture Image</button>
+            <button id="analyzeBtn" class="secondary-btn" type="button" disabled>Describe Object with Gemini</button>
+          </div>
+          <div class="capture-preview hidden">
+            <img id="cameraPreview" alt="Image selected for Gemini description" />
+          </div>
+          <canvas id="visionCanvas" class="hidden" aria-hidden="true"></canvas>
         </section>
       </main>
     </div>
 
+    <div id="deviceModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="deviceModalTitle">
+      <div class="modal-backdrop" data-close-device-modal></div>
+      <section class="device-dialog">
+        <header class="device-dialog-header">
+          <div>
+            <p class="eyebrow">VIVA HARDWARE</p>
+            <h2 id="deviceModalTitle">Connect Your Device</h2>
+          </div>
+          <button id="closeDeviceModal" class="modal-close" type="button" aria-label="Close">×</button>
+        </header>
+
+        <div class="connection-choices" role="tablist" aria-label="Connection method">
+          <button class="connection-choice selected" type="button" data-connection-mode="bluetooth">
+            <span class="choice-icon">ᛒ</span><span><strong>Bluetooth HC-05</strong><small>Pair and connect wirelessly</small></span>
+          </button>
+          <button class="connection-choice" type="button" data-connection-mode="usb">
+            <span class="choice-icon">↔</span><span><strong>USB Serial</strong><small>Connect using Arduino USB</small></span>
+          </button>
+          <button class="connection-choice" type="button" data-connection-mode="simulation">
+            <span class="choice-icon">◌</span><span><strong>Simulation Mode</strong><small>Try VIVA without hardware</small></span>
+          </button>
+        </div>
+
+        <div id="bluetoothConnectionPanel" class="connection-panel">
+          <div class="connection-heading">
+            <span class="large-device-icon">ᛒ</span>
+            <div><h3>Connect via Bluetooth</h3><p>Use the HC-05 Bluetooth Classic serial port paired with Windows.</p></div>
+          </div>
+          <div class="pairing-note"><strong>Before scanning:</strong> Pair the HC-05 in Windows Settings → Bluetooth &amp; devices. Then choose its <b>outgoing</b> COM port.</div>
+          <div class="scan-controls">
+            <button id="findBluetoothDevicesBtn" class="primary-btn" type="button">Find Bluetooth Devices</button>
+            <span id="bluetoothScanState" class="scan-state" aria-live="polite"></span>
+          </div>
+          <p id="bluetoothDeviceMessage" class="device-message">Scan to list Bluetooth serial COM ports detected by Windows.</p>
+          <div id="bluetoothDeviceList" class="device-list"></div>
+        </div>
+
+        <div id="usbConnectionPanel" class="connection-panel hidden">
+          <div class="connection-heading">
+            <span class="large-device-icon">↔</span>
+            <div><h3>Connect via USB Serial</h3><p>Connect the Uno using its USB cable and select the COM port.</p></div>
+          </div>
+          <div class="usb-controls">
+            <select id="usbPortSelect" aria-label="USB serial port"><option value="">Find serial ports…</option></select>
+            <button id="findSerialPortsBtn" class="secondary-btn" type="button">Refresh Ports</button>
+            <button id="connectUsbBtn" class="primary-btn" type="button">Connect</button>
+          </div>
+          <p id="usbDeviceMessage" class="device-message">USB serial ports are discovered from Windows; no port is assumed.</p>
+        </div>
+
+        <div id="simulationConnectionPanel" class="connection-panel hidden">
+          <div class="connection-heading">
+            <span class="large-device-icon">◌</span>
+            <div><h3>Simulation Mode</h3><p>Use the dashboard without connecting an Arduino. Physical LED changes are not claimed.</p></div>
+          </div>
+          <button id="selectSimulationBtn" class="secondary-btn" type="button">Use Simulation Mode</button>
+        </div>
+
+        <div id="connectedDevicePanel" class="connected-device hidden">
+          <div class="connected-heading"><span class="connected-indicator"></span><div><strong>Connected</strong><span id="connectedDeviceName"></span></div></div>
+          <p id="connectedDeviceDetails" class="device-message"></p>
+          <div class="connected-actions">
+            <button id="testDeviceConnectionBtn" class="secondary-btn" type="button">Test Connection</button>
+            <button id="disconnectDeviceBtn" class="danger-btn" type="button">Disconnect</button>
+          </div>
+        </div>
+
+        <footer class="device-dialog-footer">
+          <span id="deviceModalFeedback" aria-live="polite">Choose a connection method to continue.</span>
+          <button id="cancelDeviceModal" class="secondary-btn" type="button">Cancel</button>
+        </footer>
+      </section>
+    </div>
+
     <div id="toast" class="toast"></div>
+    <script src="/static/color_detection.js"></script>
     <script src="/static/app.js"></script>
   </body>
 </html>

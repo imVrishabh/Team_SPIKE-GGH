@@ -9,7 +9,8 @@ VIVA is a smart home companion that lets you control a bedroom LED, create remin
 - Creates and tracks reminders in SQLite using Asia/Kolkata time
 - Speaks responses using browser speech synthesis
 - Accepts voice commands in browsers that support Web Speech API
-- Captures a snapshot from your phone camera and optionally describes it with Gemini
+- Estimates the most common colour in the live camera's central region locally in the browser
+- Captures a snapshot from your phone camera and optionally describes it with Gemini on explicit request
 - Works in simulation mode when hardware is disconnected
 
 ## Setup on Windows
@@ -54,13 +55,13 @@ Use the sketch in `arduino/viva_bedroom.ino`.
 - Arduino D7 -> 220–330 ohm resistor -> LED anode
 - LED cathode -> Arduino GND
 - USB serial: connect via the USB cable for the first working setup
-- HC-05 Bluetooth: D10 and D11 are used for SoftwareSerial
-  - HC-05 TX -> Arduino D11
-  - HC-05 RX -> Arduino D10
+- HC-05 Bluetooth uses SoftwareSerial at 9600 baud:
+  - HC-05 TXD -> Arduino D10 (SoftwareSerial RX)
+  - Arduino D11 (SoftwareSerial TX) -> a voltage divider -> HC-05 RXD
   - HC-05 VCC -> Arduino 5V
   - HC-05 GND -> Arduino GND
 
-Upload the sketch from Arduino IDE. In Windows, open Device Manager and note the COM port assigned to the Arduino.
+Upload `arduino/viva_bedroom.ino` from Arduino IDE over USB. Select the Uno board and the Arduino's USB COM port in Arduino IDE, then upload. Close Arduino IDE's Serial Monitor before connecting from VIVA, because only one program can own a COM port at a time.
 
 ## Testing USB serial
 
@@ -72,12 +73,19 @@ Upload the sketch from Arduino IDE. In Windows, open Device Manager and note the
 
 ## Switching to HC-05 Bluetooth
 
-1. Pair the HC-05 to the laptop or phone.
-2. Note the assigned Windows COM port from Bluetooth devices or Device Manager.
-3. Set `HARDWARE_MODE=bluetooth`
-4. Set `ARDUINO_PORT` to that COM port
-5. Use 9600 baud
-6. Do not claim a real LED change if the hardware is not connected or the port is unavailable
+1. Power the HC-05 and open Windows **Settings → Bluetooth & devices → Add device → Bluetooth**. Pair it with Windows; common module pairing PINs are `1234` or `0000` if Windows asks.
+2. Find its serial port in **Device Manager → Ports (COM & LPT)** or **Settings → Bluetooth & devices → Devices → More Bluetooth settings → COM Ports**. Select the **outgoing** port for the paired HC-05; the incoming port is not the one VIVA initiates a connection through.
+3. Keep the current USB sketch upload setup; the HC-05 D10/D11 wiring must be connected and powered for serial commands to reach the Arduino.
+4. Start VIVA, click **Connect Device → Bluetooth HC-05 → Find Bluetooth Devices**, choose the detected COM port, and click **Connect**. VIVA discovers Bluetooth SPP serial ports using pyserial's Windows port enumeration; it does not use browser Web Bluetooth.
+5. Windows often reports only a generic description such as “Standard Serial over Bluetooth link”, not the HC-05 name. Identify the correct outgoing COM port in Windows settings/Device Manager; VIVA does not guess a name or COM port.
+6. VIVA opens the selected port at 9600 baud and sends `STATUS`. It shows **Connected** only after a valid `OK STATUS ON/OFF` Arduino acknowledgement. Use **Test Connection** to repeat this check.
+7. Click **Disconnect** before changing ports or closing VIVA. Manual and Gemini light commands use this active serial connection and require an Arduino acknowledgement to report success.
+
+If no Bluetooth ports appear, pair the HC-05 in Windows first and refresh. If a port is busy, close Arduino IDE's Serial Monitor and other terminal/serial apps, disconnect in VIVA, then retry. If the port opens but STATUS times out, check the outgoing COM port, HC-05 power and wiring, voltage divider on D11 → HC-05 RXD, 9600 baud, and that the VIVA sketch is uploaded. A serial port opening alone is not proof the Arduino is connected.
+
+The USB Serial choice is also in **Connect Device**. Refresh ports, select the Arduino USB COM port, and connect; it uses the same STATUS acknowledgement check. Use **Simulation Mode** to test the interface without physical hardware.
+
+`pyserial` (already listed in `requirements.txt`) enumerates Windows COM ports; no additional Bluetooth package or Web Bluetooth support is needed.
 
 ## Accessing the app from your Android phone
 
@@ -106,6 +114,17 @@ Upload the sketch from Arduino IDE. In Windows, open Device Manager and note the
 - Browser speech recognition is available only in supported browsers and may require HTTPS or localhost.
 - Camera access may fail if permission is denied or if the page is not running in a secure context.
 - If the browser does not support Web Speech or the phone blocks access, the text input remains available.
+
+## AI Vision colour recognition
+
+1. Open the dashboard in a browser that supports `getUserMedia` (use `http://localhost:8000` on the laptop, or HTTPS for phone camera access; ordinary HTTP on a LAN may not be a secure context).
+2. In the **AI Vision** card, click **Open Camera** and allow camera access.
+3. Point the camera at the object and click **Identify Colour**. VIVA samples the central part of one frame locally in JavaScript/Canvas; routine colour detection does not upload the image or call Gemini.
+4. Review the estimated name, swatch, hex/RGB value, and heuristic share of sampled pixels. The result describes the centre region, so move the object into the middle for best results.
+5. Click **Speak Result** to have browser speech synthesis say the detected colour.
+6. To use Gemini separately, click **Capture Image**, then **Describe Object with Gemini**. Only that explicit action uploads the captured image to the backend. Closing the camera stops its video tracks; the captured still remains available for the requested Gemini description until the page is refreshed.
+
+Colour estimates are approximate. Lighting, shadows, reflections, background colours, and camera white balance can affect classification. The confidence percentage is the winning class's share of eligible pixels in the sampled central area; it is a heuristic, not a calibrated probability. Use **Close Camera** when finished to release the camera.
 
 ## Common errors and fixes
 

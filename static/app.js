@@ -8,9 +8,24 @@ const backendPill = document.getElementById('backend-pill');
 const geminiPill = document.getElementById('gemini-pill');
 const arduinoPill = document.getElementById('arduino-pill');
 const hardwareBadge = document.getElementById('hardware-badge');
+const deviceModal = document.getElementById('deviceModal');
+const bluetoothDeviceList = document.getElementById('bluetoothDeviceList');
+const bluetoothDeviceMessage = document.getElementById('bluetoothDeviceMessage');
+const deviceModalFeedback = document.getElementById('deviceModalFeedback');
+const connectedDevicePanel = document.getElementById('connectedDevicePanel');
+const visionMessage = document.getElementById('visionMessage');
+const cameraVideo = document.getElementById('cameraVideo');
+const visionCanvas = document.getElementById('visionCanvas');
+const colourResult = document.getElementById('colourResult');
+const connectionPanels = {
+  bluetooth: document.getElementById('bluetoothConnectionPanel'),
+  usb: document.getElementById('usbConnectionPanel'),
+  simulation: document.getElementById('simulationConnectionPanel'),
+};
 
 let cameraStream = null;
 let currentImageData = null;
+let lastColourResult = null;
 let recognition = null;
 let listening = false;
 const firedReminderIds = new Set();
@@ -58,6 +73,176 @@ function updateConnectionIndicators(status) {
 
   if (status.arduino && status.arduino.state) {
     lightStateLabel.textContent = status.arduino.state;
+  }
+  updateConnectedDevice(status.arduino);
+}
+
+function updateConnectedDevice(deviceStatus) {
+  const isConnected = !!(deviceStatus && deviceStatus.connected && !deviceStatus.simulation);
+  connectedDevicePanel.classList.toggle('hidden', !isConnected);
+  if (!isConnected) return;
+
+  const modeName = deviceStatus.mode === 'bluetooth' ? 'Bluetooth HC-05' : 'USB Serial';
+  document.getElementById('connectedDeviceName').textContent = `${modeName} · ${deviceStatus.port}`;
+  document.getElementById('connectedDeviceDetails').textContent =
+    `Arduino acknowledged STATUS at ${deviceStatus.baud} baud.`;
+}
+
+function openDeviceModal() {
+  deviceModal.classList.remove('hidden');
+  selectConnectionMode('bluetooth');
+  document.getElementById('closeDeviceModal').focus();
+  refreshDeviceStatus();
+}
+
+function closeDeviceModal() {
+  deviceModal.classList.add('hidden');
+}
+
+function selectConnectionMode(mode) {
+  document.querySelectorAll('[data-connection-mode]').forEach((button) => {
+    const selected = button.dataset.connectionMode === mode;
+    button.classList.toggle('selected', selected);
+    button.setAttribute('aria-selected', String(selected));
+  });
+  Object.entries(connectionPanels).forEach(([panelMode, panel]) => {
+    panel.classList.toggle('hidden', panelMode !== mode);
+  });
+  deviceModalFeedback.textContent = mode === 'bluetooth'
+    ? 'Pair the HC-05 with Windows before scanning.'
+    : mode === 'usb'
+      ? 'Connect the Uno by USB and select its detected COM port.'
+      : 'Simulation does not connect to physical hardware.';
+}
+
+async function refreshDeviceStatus() {
+  try {
+    const status = await fetchJson('/api/bluetooth/status');
+    updateConnectedDevice(status);
+    if (status.connected) {
+      selectConnectionMode(status.mode);
+      deviceModalFeedback.textContent = `Connected on ${status.port}.`;
+    }
+  } catch (error) {
+    deviceModalFeedback.textContent = error.message;
+  }
+}
+
+async function scanBluetoothDevices() {
+  const scanState = document.getElementById('bluetoothScanState');
+  const scanButton = document.getElementById('findBluetoothDevicesBtn');
+  bluetoothDeviceList.replaceChildren();
+  bluetoothDeviceMessage.textContent = 'Looking for Bluetooth serial COM ports…';
+  scanState.textContent = 'Scanning';
+  scanState.classList.add('loading');
+  scanButton.disabled = true;
+
+  try {
+    const result = await fetchJson('/api/bluetooth/devices');
+    const devices = result.items || [];
+    bluetoothDeviceMessage.textContent = devices.length
+      ? result.message
+      : `${result.message} Windows may only report a generic port description, not the paired module name.`;
+
+    devices.forEach((device) => {
+      const row = document.createElement('div');
+      row.className = 'device-row';
+      const details = document.createElement('div');
+      const title = document.createElement('strong');
+      title.textContent = device.device_name || 'Bluetooth serial device';
+      const subtitle = document.createElement('small');
+      subtitle.textContent = device.description || 'Windows Bluetooth SPP serial port';
+      const port = document.createElement('small');
+      port.className = 'device-port';
+      port.textContent = device.port;
+      details.append(title, subtitle, port);
+      const connectButton = document.createElement('button');
+      connectButton.type = 'button';
+      connectButton.className = 'secondary-btn';
+      connectButton.textContent = 'Connect';
+      connectButton.addEventListener('click', () => connectDevice(device.port, 'bluetooth'));
+      row.append(details, connectButton);
+      bluetoothDeviceList.appendChild(row);
+    });
+    scanState.textContent = devices.length ? `${devices.length} port${devices.length === 1 ? '' : 's'} found` : '';
+  } catch (error) {
+    bluetoothDeviceMessage.textContent = error.message;
+    scanState.textContent = 'Scan failed';
+  } finally {
+    scanButton.disabled = false;
+    scanState.classList.remove('loading');
+  }
+}
+
+async function scanSerialPorts() {
+  const select = document.getElementById('usbPortSelect');
+  const message = document.getElementById('usbDeviceMessage');
+  select.replaceChildren(new Option('Select a detected serial port…', ''));
+  try {
+    const result = await fetchJson('/api/serial/ports');
+    const ports = result.items || [];
+    ports.forEach((port) => {
+      const description = port.description ? ` — ${port.description}` : '';
+      select.add(new Option(`${port.port}${description}`, port.port));
+    });
+    message.textContent = ports.length
+      ? 'Choose the Arduino USB COM port from Windows Device Manager.'
+      : 'No serial ports detected. Connect the board and refresh ports.';
+  } catch (error) {
+    message.textContent = error.message;
+  }
+}
+
+async function connectDevice(port, mode) {
+  deviceModalFeedback.textContent = `Opening ${port} and waiting for Arduino STATUS acknowledgement…`;
+  try {
+    const result = await fetchJson('/api/bluetooth/connect', {
+      method: 'POST',
+      body: JSON.stringify({ port, baud: 9600, mode }),
+    });
+    deviceModalFeedback.textContent = result.message;
+    updateConnectedDevice(result);
+    await refreshStatus();
+    addLog(result.message, 'success');
+  } catch (error) {
+    deviceModalFeedback.textContent = error.message;
+    updateConnectedDevice({ connected: false });
+    addLog(error.message, 'error');
+  }
+}
+
+async function selectSimulationMode() {
+  try {
+    const result = await fetchJson('/api/hardware/simulation', { method: 'POST' });
+    updateConnectedDevice(result);
+    deviceModalFeedback.textContent = result.message;
+    await refreshStatus();
+  } catch (error) {
+    deviceModalFeedback.textContent = error.message;
+  }
+}
+
+async function testDeviceConnection() {
+  deviceModalFeedback.textContent = 'Sending STATUS and waiting for acknowledgement…';
+  try {
+    const result = await fetchJson('/api/bluetooth/test', { method: 'POST' });
+    deviceModalFeedback.textContent = result.message;
+    updateConnectedDevice(result);
+    await refreshStatus();
+  } catch (error) {
+    deviceModalFeedback.textContent = error.message;
+    await refreshStatus();
+  }
+}
+
+async function disconnectDevice() {
+  try {
+    const result = await fetchJson('/api/bluetooth/disconnect', { method: 'POST' });
+    deviceModalFeedback.textContent = result.message;
+    updateConnectedDevice(result);
+    await refreshStatus();
+  } catch (error) {
+    deviceModalFeedback.textContent = error.message;
   }
 }
 
@@ -185,6 +370,30 @@ commandInput.addEventListener('keydown', (event) => {
   if (event.key === 'Enter') handleCommandSubmit();
 });
 
+document.getElementById('connectDeviceBtn').addEventListener('click', openDeviceModal);
+document.getElementById('closeDeviceModal').addEventListener('click', closeDeviceModal);
+document.getElementById('cancelDeviceModal').addEventListener('click', closeDeviceModal);
+deviceModal.querySelector('[data-close-device-modal]').addEventListener('click', closeDeviceModal);
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && !deviceModal.classList.contains('hidden')) closeDeviceModal();
+});
+document.querySelectorAll('[data-connection-mode]').forEach((button) => {
+  button.addEventListener('click', () => selectConnectionMode(button.dataset.connectionMode));
+});
+document.getElementById('findBluetoothDevicesBtn').addEventListener('click', scanBluetoothDevices);
+document.getElementById('findSerialPortsBtn').addEventListener('click', scanSerialPorts);
+document.getElementById('connectUsbBtn').addEventListener('click', () => {
+  const port = document.getElementById('usbPortSelect').value;
+  if (!port) {
+    document.getElementById('usbDeviceMessage').textContent = 'Select a detected serial COM port first.';
+    return;
+  }
+  connectDevice(port, 'usb');
+});
+document.getElementById('selectSimulationBtn').addEventListener('click', selectSimulationMode);
+document.getElementById('testDeviceConnectionBtn').addEventListener('click', testDeviceConnection);
+document.getElementById('disconnectDeviceBtn').addEventListener('click', disconnectDevice);
+
 document.getElementById('lightOnBtn').addEventListener('click', async () => {
   try {
     const result = await fetchJson('/api/light/on', { method: 'POST' });
@@ -278,66 +487,178 @@ micBtn.addEventListener('click', () => {
   setMessage('Listening... speak your command.', 'info');
 });
 
+function setVisionMessage(message, level = 'info') {
+  visionMessage.textContent = message;
+  visionMessage.className = `vision-message ${level}`;
+}
+
+function setCameraLive(isLive) {
+  cameraVideo.classList.toggle('hidden', !isLive);
+  document.getElementById('cameraPlaceholderMessage').classList.toggle('hidden', isLive);
+  document.getElementById('cameraLiveBadge').classList.toggle('hidden', !isLive);
+  document.getElementById('openCameraBtn').disabled = isLive;
+  document.getElementById('closeCameraBtn').disabled = !isLive;
+  document.getElementById('identifyColourBtn').disabled = !isLive;
+  document.getElementById('captureBtn').disabled = !isLive;
+  document.getElementById('analyzeBtn').disabled = !currentImageData;
+}
+
 async function openCamera() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    setMessage('Camera not supported in this browser.', 'error');
+    setVisionMessage('Camera access is unavailable. Use a supported browser and a secure context (HTTPS or localhost).', 'error');
     return;
   }
 
-  const video = document.getElementById('cameraVideo');
   try {
-    cameraStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
-    video.srcObject = cameraStream;
-    setMessage('Camera is live.', 'success');
+    setVisionMessage('Requesting camera permission…');
+    cameraStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false,
+    });
+    cameraStream.getVideoTracks().forEach((track) => {
+      track.addEventListener('ended', () => {
+        if (!cameraStream) return;
+        releaseCamera();
+        setVisionMessage('The camera stream ended. Reopen the camera to continue.', 'error');
+      }, { once: true });
+    });
+    cameraVideo.srcObject = cameraStream;
+    await cameraVideo.play();
+    setCameraLive(true);
+    setVisionMessage('Camera is live. Point it at a colour and choose Identify Colour.', 'success');
   } catch (error) {
-    setMessage('Camera permission was denied. Please allow access and try again.', 'error');
+    releaseCamera();
+    if (error.name === 'NotAllowedError' || error.name === 'SecurityError') {
+      setVisionMessage('Camera permission was denied. Allow camera access in your browser settings and try again.', 'error');
+    } else if (error.name === 'NotFoundError' || error.name === 'DevicesNotFoundError') {
+      setVisionMessage('No camera was found on this device.', 'error');
+    } else if (error.name === 'NotReadableError' || error.name === 'TrackStartError') {
+      setVisionMessage('The camera is already in use by another app or could not start. Close other camera apps and retry.', 'error');
+    } else {
+      setVisionMessage(`Could not open the camera: ${error.message || 'unknown camera error'}`, 'error');
+    }
   }
 }
 
-function capturePhoto() {
-  const video = document.getElementById('cameraVideo');
-  const preview = document.getElementById('cameraPreview');
-  if (!video || !video.videoWidth) {
-    setMessage('Open the camera before taking a picture.', 'error');
-    return;
+function releaseCamera() {
+  if (cameraStream) {
+    cameraStream.getTracks().forEach((track) => track.stop());
+    cameraStream = null;
   }
-  const canvas = document.createElement('canvas');
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
-  const ctx = canvas.getContext('2d');
-  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-  const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+  cameraVideo.srcObject = null;
+  setCameraLive(false);
+}
+
+function captureCurrentFrame(maxWidth = 1280) {
+  if (!cameraStream || !cameraVideo.videoWidth || !cameraVideo.videoHeight) {
+    throw new Error('Open the camera and wait for the live preview before capturing a frame.');
+  }
+  const scale = Math.min(1, maxWidth / cameraVideo.videoWidth);
+  const width = Math.max(1, Math.round(cameraVideo.videoWidth * scale));
+  const height = Math.max(1, Math.round(cameraVideo.videoHeight * scale));
+  visionCanvas.width = width;
+  visionCanvas.height = height;
+  const context = visionCanvas.getContext('2d', { willReadFrequently: true });
+  if (!context) throw new Error('Could not prepare the camera frame for analysis.');
+  context.drawImage(cameraVideo, 0, 0, width, height);
+  return context;
+}
+
+function saveFrameForGemini() {
+  captureCurrentFrame();
+  const preview = document.getElementById('cameraPreview');
+  const dataUrl = visionCanvas.toDataURL('image/jpeg', 0.82);
   preview.src = dataUrl;
   currentImageData = dataUrl.split(',')[1];
   document.querySelector('.capture-preview').classList.remove('hidden');
-  setMessage('Image captured. Ready for analysis.', 'success');
+  document.getElementById('analyzeBtn').disabled = false;
+  setVisionMessage('Image captured locally. It will only be sent to Gemini if you request a description.', 'success');
+}
+
+function identifyColour() {
+  const button = document.getElementById('identifyColourBtn');
+  button.disabled = true;
+  button.textContent = 'Analysing…';
+  setVisionMessage('Analysing the central camera region locally…');
+
+  try {
+    const context = captureCurrentFrame(480);
+    const pixels = context.getImageData(0, 0, visionCanvas.width, visionCanvas.height);
+    const result = VivaColorDetection.detectDominantColour(pixels);
+    lastColourResult = result;
+    colourResult.classList.remove('hidden');
+    document.getElementById('colourSwatch').style.backgroundColor = result.hex;
+    document.getElementById('colourSwatch').setAttribute('aria-label', `Colour swatch ${result.hex}`);
+    document.getElementById('colourName').textContent = result.name[0].toUpperCase() + result.name.slice(1);
+    const confidence = Math.round(result.confidence * 100);
+    document.getElementById('colourDetails').textContent =
+      `${result.hex.toUpperCase()} · RGB ${result.rgb.join(', ')} · ${confidence}% of sampled pixels`;
+    setVisionMessage('Colour estimate ready. Lighting and camera white balance can affect the result.', 'success');
+    addLog(`AI Vision detected ${result.name} (${result.hex.toUpperCase()}) in the central region.`, 'success');
+  } catch (error) {
+    setVisionMessage(error.message, 'error');
+  } finally {
+    button.disabled = !cameraStream;
+    button.textContent = 'Identify Colour';
+  }
+}
+
+function speakColourResult() {
+  if (!lastColourResult) {
+    setVisionMessage('Identify a colour before asking VIVA to speak the result.', 'error');
+    return;
+  }
+  speakText(`The detected colour is ${lastColourResult.name}.`);
+}
+
+function capturePhoto() {
+  try {
+    saveFrameForGemini();
+  } catch (error) {
+    setVisionMessage(error.message, 'error');
+  }
 }
 
 async function analyzeImage() {
   if (!currentImageData) {
-    setMessage('Capture an image before requesting description.', 'error');
+    setVisionMessage('Open the camera and capture an image before requesting a Gemini description.', 'error');
     return;
   }
 
+  const analyzeButton = document.getElementById('analyzeBtn');
+  analyzeButton.disabled = true;
+  analyzeButton.textContent = 'Sending to Gemini…';
+  setVisionMessage('Sending the selected image to Gemini for description…');
   try {
     const result = await fetchJson('/api/camera/analyze', {
       method: 'POST',
       body: JSON.stringify({ image_data: currentImageData, prompt: 'Describe this image in a short and helpful way.' }),
     });
     if (result.ok && result.result && result.result.message) {
-      setMessage(result.result.message, 'success');
+      setVisionMessage(result.result.message, 'success');
+      addLog(`Gemini image description: ${result.result.message}`, 'success');
       speakText(result.result.message);
     } else {
-      setMessage(result.message || 'Image analysis failed.', 'error');
+      setVisionMessage(result.message || 'Image analysis failed.', 'error');
     }
   } catch (error) {
-    setMessage(error.message, 'error');
+    setVisionMessage(error.message, 'error');
+  } finally {
+    analyzeButton.disabled = !currentImageData;
+    analyzeButton.textContent = 'Describe Object with Gemini';
   }
 }
 
 document.getElementById('openCameraBtn').addEventListener('click', openCamera);
+document.getElementById('closeCameraBtn').addEventListener('click', () => {
+  releaseCamera();
+  setVisionMessage('Camera closed. Your last captured image remains available for an explicitly requested Gemini description.');
+});
+document.getElementById('identifyColourBtn').addEventListener('click', identifyColour);
+document.getElementById('speakColourBtn').addEventListener('click', speakColourResult);
 document.getElementById('captureBtn').addEventListener('click', capturePhoto);
 document.getElementById('analyzeBtn').addEventListener('click', analyzeImage);
+window.addEventListener('pagehide', releaseCamera);
 
 if ('Notification' in window) {
   Notification.requestPermission().catch(() => {});
@@ -345,6 +666,7 @@ if ('Notification' in window) {
 
 setInterval(refreshStatus, 10000);
 setInterval(refreshReminders, 5000);
+scanSerialPorts();
 refreshStatus();
 refreshReminders();
 

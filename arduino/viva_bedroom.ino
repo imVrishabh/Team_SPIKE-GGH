@@ -1,28 +1,16 @@
 /*
   VIVA bedroom LED controller
 
-  Wiring (Arduino Uno):
-  - Arduino D7 -> 220–330 ohm resistor -> LED anode
-  - LED cathode -> Arduino GND
-  - HC-05 Bluetooth module:
-      HC-05 TX -> Arduino D11 (SoftwareSerial RX)
-      HC-05 RX -> Arduino D10 (SoftwareSerial TX)
-      HC-05 VCC -> Arduino 5V
-      HC-05 GND -> Arduino GND
+  Arduino Uno wiring:
+  - D7 -> 220-330 ohm resistor -> LED anode; LED cathode -> GND
+  - HC-05 TXD -> D10 (SoftwareSerial RX)
+  - D11 (SoftwareSerial TX) -> voltage divider -> HC-05 RXD
+  - HC-05 VCC -> 5V; HC-05 GND -> GND
 
-  Commands accepted over USB and Bluetooth serial:
-  - LIGHT_ON
-  - LIGHT_OFF
-  - STATUS
-
-  Commands must end with newline. The sketch replies with status strings such as:
-  - OK:LIGHT_ON
-  - OK:LIGHT_OFF
-  - STATUS:ON
-  - STATUS:OFF
-  - UNKNOWN
-
-  This sketch uses SoftwareSerial for Bluetooth to avoid conflicts with the USB serial monitor.
+  USB Serial and HC-05 accept STATUS, LIGHT_ON, and LIGHT_OFF commands,
+  each terminated by a newline. Replies are newline-terminated:
+  OK STATUS ON/OFF, OK LIGHT_ON, OK LIGHT_OFF, or ERR UNKNOWN.
+  SoftwareSerial keeps Bluetooth separate from USB Serial debugging.
 */
 
 #include <SoftwareSerial.h>
@@ -32,66 +20,55 @@ const int BT_RX_PIN = 10;
 const int BT_TX_PIN = 11;
 
 SoftwareSerial btSerial(BT_RX_PIN, BT_TX_PIN);
+String usbCommand;
+String bluetoothCommand;
 
-String readSerial(Stream &serialPort) {
-  String incoming = "";
+bool readCommand(Stream &serialPort, String &buffer) {
   while (serialPort.available()) {
-    char ch = serialPort.read();
-    if (ch == '\n' || ch == '\r') {
-      if (incoming.length() > 0) {
-        break;
-      }
-      continue;
+    char ch = (char)serialPort.read();
+    if (ch == '\n') {
+      buffer.trim();
+      return buffer.length() > 0;
     }
-    incoming += ch;
+    if (ch == '\r') continue;
+    if (buffer.length() < 48) buffer += ch;
+    else buffer = "";
   }
-  return incoming;
+  return false;
 }
 
-void processCommand(String command) {
+void processCommand(String command, Stream &replyPort) {
   command.trim();
   if (command == "LIGHT_ON") {
     digitalWrite(LED_PIN, HIGH);
-    Serial.println("OK:LIGHT_ON");
-    btSerial.println("OK:LIGHT_ON");
+    replyPort.println("OK LIGHT_ON");
   } else if (command == "LIGHT_OFF") {
     digitalWrite(LED_PIN, LOW);
-    Serial.println("OK:LIGHT_OFF");
-    btSerial.println("OK:LIGHT_OFF");
+    replyPort.println("OK LIGHT_OFF");
   } else if (command == "STATUS") {
-    int state = digitalRead(LED_PIN) == HIGH ? 1 : 0;
-    String statusText = state ? "STATUS:ON" : "STATUS:OFF";
-    Serial.println(statusText);
-    btSerial.println(statusText);
+    replyPort.print("OK STATUS ");
+    replyPort.println(digitalRead(LED_PIN) == HIGH ? "ON" : "OFF");
   } else {
-    Serial.println("UNKNOWN");
-    btSerial.println("UNKNOWN");
+    replyPort.println("ERR UNKNOWN");
   }
 }
 
 void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
-
   Serial.begin(9600);
   btSerial.begin(9600);
-
   Serial.println("VIVA: ready");
   btSerial.println("VIVA: ready");
 }
 
 void loop() {
-  if (Serial.available()) {
-    String command = readSerial(Serial);
-    if (command.length() > 0) {
-      processCommand(command);
-    }
+  if (readCommand(Serial, usbCommand)) {
+    processCommand(usbCommand, Serial);
+    usbCommand = "";
   }
-
-  if (btSerial.available()) {
-    String command = readSerial(btSerial);
-    if (command.length() > 0) {
-      processCommand(command);
-    }
+  if (readCommand(btSerial, bluetoothCommand)) {
+    processCommand(bluetoothCommand, btSerial);
+    bluetoothCommand = "";
   }
 }

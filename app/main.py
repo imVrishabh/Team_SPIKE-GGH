@@ -1,11 +1,12 @@
 import re
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
+from starlette.concurrency import run_in_threadpool
 
 from app.gemini_service import GeminiService
 from app.hardware import hardware
@@ -37,11 +38,20 @@ class ImageAnalysisRequest(BaseModel):
     prompt: str | None = Field(default="Describe this image in a concise and useful way.", max_length=500)
 
 
+class HardwareConnectRequest(BaseModel):
+    port: str = Field(..., pattern=r"(?i)^COM[1-9]\d*$")
+    baud: int = Field(default=9600, ge=1200, le=115200)
+    mode: Literal["usb", "bluetooth"] = "bluetooth"
+
+
 @app.on_event("startup")
-def startup_event() -> None:
+async def startup_event() -> None:
     reminder_store.initialize()
     reminder_store.start_background_loop()
-    hardware.connect()
+    if hardware.mode != "simulation" and hardware.port:
+        await run_in_threadpool(hardware.connect_configured)
+    else:
+        hardware.connect(mode="simulation")
 
 
 @app.on_event("shutdown")
@@ -66,6 +76,68 @@ def api_status() -> dict[str, Any]:
         "simulation": hardware_status["simulation"],
         "timestamp": datetime.now().isoformat(),
     }
+
+
+@app.get("/api/bluetooth/devices")
+def bluetooth_devices() -> dict[str, Any]:
+    devices = hardware.discover_serial_ports(bluetooth_only=True)
+    message = (
+        "Select the HC-05 outgoing COM port. Windows may only provide a generic serial-link description."
+        if devices
+        else "No Bluetooth SPP serial ports detected. Pair the HC-05 in Windows Bluetooth Settings, then check its outgoing COM port in Device Manager."
+    )
+    return {"ok": True, "items": devices, "message": message}
+
+
+@app.get("/api/serial/ports")
+def serial_ports() -> dict[str, Any]:
+    ports = [
+        item
+        for item in hardware.discover_serial_ports()
+        if item["connection_type"] != "bluetooth"
+    ]
+    return {"ok": True, "items": ports}
+
+
+@app.post("/api/bluetooth/connect")
+async def bluetooth_connect(request: Request) -> dict[str, Any]:
+    try:
+        payload = HardwareConnectRequest.model_validate(await request.json())
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=exc.errors()) from exc
+
+    result = await run_in_threadpool(
+        hardware.connect,
+        payload.port,
+        payload.baud,
+        payload.mode,
+    )
+    if not result["ok"]:
+        raise HTTPException(status_code=503, detail=result["message"])
+    return result
+
+
+@app.post("/api/bluetooth/disconnect")
+async def bluetooth_disconnect() -> dict[str, Any]:
+    return await run_in_threadpool(hardware.disconnect)
+
+
+@app.get("/api/bluetooth/status")
+def bluetooth_status() -> dict[str, Any]:
+    return hardware.status_snapshot()
+
+
+@app.post("/api/bluetooth/test")
+async def bluetooth_test() -> dict[str, Any]:
+    result = await run_in_threadpool(hardware.test_connection)
+    if not result["ok"] and not result["simulation"]:
+        raise HTTPException(status_code=503, detail=result["message"])
+    return result
+
+
+@app.post("/api/hardware/simulation")
+async def select_simulation() -> dict[str, Any]:
+    return await run_in_threadpool(hardware.connect, None, None, "simulation")
 
 
 @app.get("/api/reminders")
@@ -141,11 +213,11 @@ async def handle_command(request: Request) -> dict[str, Any]:
     action = intent.get("action", "unknown")
 
     if action == "light_on":
-        result = hardware.set_light_on()
+        result = await run_in_threadpool(hardware.set_light_on)
         return {"ok": True, "action": "light_on", **result}
 
     if action == "light_off":
-        result = hardware.set_light_off()
+        result = await run_in_threadpool(hardware.set_light_off)
         return {"ok": True, "action": "light_off", **result}
 
     if action == "list_reminders":

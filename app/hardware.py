@@ -1,195 +1,293 @@
-import os
+import re
+import threading
 import time
-from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 import serial
+from serial.tools import list_ports
 
 from app.config import settings
+
+HardwareMode = Literal["simulation", "usb", "bluetooth"]
 
 
 class ArduinoHardware:
     def __init__(self) -> None:
-        self.mode = settings.hardware_mode
+        configured_mode = settings.hardware_mode
+        self.mode: HardwareMode = (
+            configured_mode if configured_mode in {"simulation", "usb", "bluetooth"} else "simulation"
+        )
         self.port = settings.arduino_port
         self.baud = settings.arduino_baud
-        self.connection = None
+        self.connection: serial.Serial | None = None
         self.connected = False
         self.last_error = ""
         self.state = "OFF"
-        self.simulation = self.mode == "simulation"
+        self._lock = threading.RLock()
 
-    def _is_serial_mode(self) -> bool:
-        return self.mode in {"usb", "bluetooth"}
+    @staticmethod
+    def _port_details(port_info: Any) -> dict[str, str | None]:
+        description = str(port_info.description or "").strip()
+        hwid = str(port_info.hwid or "").strip()
+        is_bluetooth_spp = "BTHENUM" in hwid.upper() and "00001101" in hwid.upper()
+        return {
+            "port": port_info.device,
+            "device_name": None,
+            "description": description or None,
+            "hardware_id": hwid or None,
+            "connection_type": "bluetooth" if is_bluetooth_spp else "serial",
+        }
 
-    def connect(self) -> dict[str, Any]:
-        if self.mode == "simulation":
-            self.connected = False
-            self.simulation = True
-            self.last_error = "SIMULATION MODE: hardware not connected."
-            return {
-                "ok": True,
-                "mode": "simulation",
-                "connected": False,
-                "message": "Simulation mode active; no physical Arduino connected.",
-            }
+    @classmethod
+    def discover_serial_ports(cls, bluetooth_only: bool = False) -> list[dict[str, str | None]]:
+        devices = []
+        for port_info in list_ports.comports():
+            details = cls._port_details(port_info)
+            if bluetooth_only and details["connection_type"] != "bluetooth":
+                continue
+            devices.append(details)
+        return devices
 
-        if not self.port:
-            self.connected = False
-            self.simulation = True
-            self.last_error = "No ARDUINO_PORT configured for this hardware mode."
-            return {
-                "ok": False,
-                "mode": self.mode,
-                "connected": False,
-                "message": "Arduino port is not configured. Set ARDUINO_PORT to the device COM port.",
-            }
-
+    def _close_locked(self) -> str | None:
+        connection = self.connection
+        self.connection = None
+        self.connected = False
+        if not connection or not connection.is_open:
+            return None
         try:
-            self.connection = serial.Serial(self.port, self.baud, timeout=1)
-            self.connected = self.connection.is_open
-            self.simulation = False
-            if self.connected:
-                self.last_error = ""
+            connection.close()
+        except (serial.SerialException, OSError) as exc:
+            return f"Serial close failed: {exc}"
+        return None
+
+    @staticmethod
+    def _valid_ack(response: str, command: str) -> bool:
+        normalized = response.strip().upper()
+        if command == "STATUS":
+            return bool(
+                re.fullmatch(r"OK STATUS(?: (?:ON|OFF))?", normalized)
+                or normalized in {"STATUS:ON", "STATUS:OFF"}
+            )
+        return normalized in {f"OK {command}", f"OK:{command}"}
+
+    def _read_ack_locked(self, command: str, timeout: float = 4.0) -> str | None:
+        if not self.connection or not self.connection.is_open:
+            return None
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                raw = self.connection.readline()
+            except (serial.SerialException, OSError) as exc:
+                self._drop_locked(f"Serial read failed: {exc}")
+                return None
+            if not raw:
+                continue
+            response = raw.decode("utf-8", errors="replace").strip()
+            if self._valid_ack(response, command):
+                return response
+        return None
+
+    def _drop_locked(self, message: str) -> None:
+        close_error = self._close_locked()
+        self.last_error = f"{message} {close_error}" if close_error else message
+
+    def connect(
+        self,
+        port: str | None = None,
+        baud: int | None = None,
+        mode: HardwareMode | None = None,
+    ) -> dict[str, Any]:
+        with self._lock:
+            selected_mode = mode or self.mode
+            if selected_mode == "simulation":
+                close_error = self._close_locked()
+                self.mode = "simulation"
+                self.port = None
+                self.last_error = close_error or ""
+                return {
+                    **self.status_snapshot(),
+                    "ok": close_error is None,
+                    "message": close_error or "SIMULATION MODE selected; no physical connection is active.",
+                }
+
+            selected_port = (port or self.port or "").strip().upper()
+            selected_baud = baud or self.baud
+            if not re.fullmatch(r"COM[1-9]\d*", selected_port):
+                return {
+                    **self.status_snapshot(),
+                    "ok": False,
+                    "message": "Select a valid Windows COM port, such as COM8.",
+                }
+
+            if (
+                self.connection
+                and self.connection.is_open
+                and self.port == selected_port
+                and self.baud == selected_baud
+                and self.mode == selected_mode
+            ):
+                return self._test_locked()
+
+            close_error = self._close_locked()
+            if close_error:
+                self.last_error = close_error
+                return {**self.status_snapshot(), "ok": False, "message": close_error}
+            self.mode = selected_mode
+            self.port = selected_port
+            self.baud = selected_baud
+            self.state = "UNKNOWN"
+            try:
+                self.connection = serial.Serial(
+                    selected_port,
+                    selected_baud,
+                    timeout=0.25,
+                    write_timeout=2,
+                )
                 self.connection.reset_input_buffer()
                 self.connection.reset_output_buffer()
+                # Opening an Uno's serial port resets it; allow its sketch to start.
+                time.sleep(1.5)
+                self.connection.write(b"STATUS\n")
+                acknowledgement = self._read_ack_locked("STATUS")
+                if not acknowledgement:
+                    self._drop_locked(
+                        f"{selected_port} opened, but the Arduino did not acknowledge STATUS. "
+                        "Check the HC-05 outgoing COM port, 9600 baud, wiring, and uploaded sketch."
+                    )
+                    return {
+                        **self.status_snapshot(),
+                        "ok": False,
+                        "message": self.last_error,
+                    }
+
+                self.connected = True
+                self.last_error = ""
+                self._update_state_from_status(acknowledgement)
                 return {
+                    **self.status_snapshot(),
                     "ok": True,
-                    "mode": self.mode,
-                    "connected": True,
-                    "message": f"Connected to Arduino on {self.port}.",
+                    "message": f"Arduino acknowledged STATUS on {selected_port}.",
+                    "acknowledgement": acknowledgement,
                 }
-        except (serial.SerialException, OSError) as exc:
-            self.connected = False
-            self.simulation = True
-            self.last_error = f"Unable to open {self.port}: {exc}"
+            except (serial.SerialException, OSError) as exc:
+                self._drop_locked(f"Unable to open {selected_port}: {exc}")
+                return {**self.status_snapshot(), "ok": False, "message": self.last_error}
+
+    def connect_configured(self) -> dict[str, Any]:
+        if self.mode == "simulation":
+            return self.connect(mode="simulation")
+        return self.connect(port=self.port, baud=self.baud, mode=self.mode)
+
+    def disconnect(self) -> dict[str, Any]:
+        with self._lock:
+            close_error = self._close_locked()
+            self.last_error = close_error or ""
             return {
+                **self.status_snapshot(),
+                "ok": close_error is None,
+                "message": close_error or "Serial connection closed.",
+            }
+
+    def _test_locked(self) -> dict[str, Any]:
+        if self.mode == "simulation":
+            return {
+                **self.status_snapshot(),
+                "ok": True,
+                "message": "SIMULATION MODE: no physical Arduino is connected.",
+            }
+        if not self.connection or not self.connection.is_open:
+            return {
+                **self.status_snapshot(),
                 "ok": False,
-                "mode": self.mode,
-                "connected": False,
+                "message": self.last_error or "No serial connection is open.",
+            }
+        try:
+            self.connection.reset_input_buffer()
+            self.connection.write(b"STATUS\n")
+            acknowledgement = self._read_ack_locked("STATUS")
+        except (serial.SerialException, OSError) as exc:
+            self._drop_locked(f"Connection test failed: {exc}")
+            acknowledgement = None
+
+        if not acknowledgement:
+            if self.connection and self.connection.is_open:
+                self._drop_locked(
+                    "Serial port is open, but no valid STATUS acknowledgement was received."
+                )
+            return {
+                **self.status_snapshot(),
+                "ok": False,
                 "message": self.last_error,
             }
 
-        self.connected = False
-        self.simulation = True
-        self.last_error = "Arduino connection could not be established."
+        self.connected = True
+        self.last_error = ""
+        self._update_state_from_status(acknowledgement)
         return {
-            "ok": False,
-            "mode": self.mode,
-            "connected": False,
-            "message": self.last_error,
-        }
-
-    def disconnect(self) -> dict[str, Any]:
-        if self.connection and self.connection.is_open:
-            self.connection.close()
-        self.connection = None
-        self.connected = False
-        self.simulation = self.mode == "simulation"
-        self.last_error = "" if self.simulation else "Disconnected from Arduino."
-        return {
+            **self.status_snapshot(),
             "ok": True,
-            "mode": self.mode,
-            "connected": False,
-            "message": "Arduino disconnected.",
+            "message": f"Arduino acknowledged STATUS on {self.port}.",
+            "acknowledgement": acknowledgement,
         }
 
     def test_connection(self) -> dict[str, Any]:
-        if self.mode == "simulation":
-            return {
-                "ok": True,
-                "mode": "simulation",
-                "connected": False,
-                "simulation": True,
-                "message": "SIMULATION MODE: no hardware connection is active.",
-            }
+        with self._lock:
+            return self._test_locked()
 
-        if not self.connection or not self.connection.is_open:
-            result = self.connect()
-            if not result["ok"]:
-                return {
-                    "ok": False,
-                    "mode": self.mode,
-                    "connected": False,
-                    "simulation": True,
-                    "message": result["message"],
-                }
-
-        self.connection.write(b"STATUS\n")
-        time.sleep(0.2)
-        response = self.read_response()
-        return {
-            "ok": True,
-            "mode": self.mode,
-            "connected": True,
-            "simulation": False,
-            "message": response or "Arduino responded.",
-        }
-
-    def read_response(self) -> str:
-        if self.mode == "simulation" or not self.connection or not self.connection.is_open:
-            return "SIMULATION MODE: no physical Arduino connected."
-
-        try:
-            raw = self.connection.readline()
-        except serial.SerialException:
-            self.connected = False
-            self.last_error = "Serial communication error."
-            return self.last_error
-
-        if raw:
-            decoded = raw.decode("utf-8", errors="replace").strip()
-            if decoded:
-                return decoded
-        return "No response received from Arduino."
+    def _update_state_from_status(self, response: str) -> None:
+        match = re.search(r"\b(ON|OFF)\b", response.upper())
+        if match:
+            self.state = match.group(1)
 
     def _send_command(self, command: str) -> dict[str, Any]:
-        if self.mode == "simulation":
-            self.state = "ON" if command == "LIGHT_ON" else "OFF" if command == "LIGHT_OFF" else self.state
-            return {
-                "ok": True,
-                "mode": "simulation",
-                "connected": False,
-                "simulated": True,
-                "state": self.state,
-                "message": "SIMULATION MODE: physical LED state is not confirmed. The command was queued for display only.",
-            }
-
-        if not self.connection or not self.connection.is_open:
-            result = self.connect()
-            if not result["ok"]:
+        with self._lock:
+            if self.mode == "simulation":
+                self.state = "ON" if command == "LIGHT_ON" else "OFF"
                 return {
-                    "ok": False,
-                    "mode": self.mode,
-                    "connected": False,
+                    **self.status_snapshot(),
+                    "ok": True,
                     "simulated": True,
-                    "state": self.state,
-                    "message": result["message"],
+                    "message": (
+                        "SIMULATION MODE: command recorded for the demo; "
+                        "no physical LED change is confirmed."
+                    ),
                 }
 
-        try:
-            self.connection.write(f"{command}\n".encode("utf-8"))
-            time.sleep(0.15)
-            response = self.read_response()
-            self.state = "ON" if command == "LIGHT_ON" else "OFF" if command == "LIGHT_OFF" else self.state
+            if not self.connected or not self.connection or not self.connection.is_open:
+                return {
+                    **self.status_snapshot(),
+                    "ok": False,
+                    "simulated": False,
+                    "message": self.last_error or "No acknowledged Arduino connection. Connect and test first.",
+                }
+
+            try:
+                self.connection.reset_input_buffer()
+                self.connection.write(f"{command}\n".encode("ascii"))
+                acknowledgement = self._read_ack_locked(command)
+            except (serial.SerialException, OSError) as exc:
+                self._drop_locked(f"Serial command failed: {exc}")
+                acknowledgement = None
+
+            if not acknowledgement:
+                if self.connection and self.connection.is_open:
+                    self.last_error = f"No valid {command} acknowledgement received."
+                return {
+                    **self.status_snapshot(),
+                    "ok": False,
+                    "simulated": False,
+                    "message": self.last_error,
+                }
+
+            self.state = "ON" if command == "LIGHT_ON" else "OFF"
+            self.last_error = ""
             return {
+                **self.status_snapshot(),
                 "ok": True,
-                "mode": self.mode,
-                "connected": True,
                 "simulated": False,
-                "state": self.state,
-                "message": response,
-            }
-        except serial.SerialException as exc:  # pragma: no cover
-            self.connected = False
-            self.last_error = str(exc)
-            return {
-                "ok": False,
-                "mode": self.mode,
-                "connected": False,
-                "simulated": True,
-                "state": self.state,
-                "message": f"Serial error: {exc}",
+                "acknowledgement": acknowledgement,
+                "message": f"Arduino acknowledged {command}.",
             }
 
     def set_light_on(self) -> dict[str, Any]:
@@ -199,60 +297,29 @@ class ArduinoHardware:
         return self._send_command("LIGHT_OFF")
 
     def read_status(self) -> dict[str, Any]:
-        if self.mode == "simulation":
-            return {
-                "ok": True,
-                "mode": "simulation",
-                "connected": False,
-                "simulated": True,
-                "state": self.state,
-                "message": "SIMULATION MODE: no physical Arduino is connected.",
-            }
-
-        if not self.connection or not self.connection.is_open:
-            result = self.connect()
-            if not result["ok"]:
+        with self._lock:
+            if self.mode == "simulation":
                 return {
-                    "ok": False,
-                    "mode": self.mode,
-                    "connected": False,
+                    **self.status_snapshot(),
+                    "ok": True,
                     "simulated": True,
-                    "state": self.state,
-                    "message": result["message"],
+                    "message": "SIMULATION MODE: no physical Arduino is connected.",
                 }
+            return self._test_locked()
 
-        try:
-            self.connection.write(b"STATUS\n")
-            time.sleep(0.2)
-            response = self.read_response()
-            if response.upper().startswith("STATUS:"):
-                self.state = response.split(":", 1)[1].strip().upper()
-            return {
-                "ok": True,
-                "mode": self.mode,
-                "connected": True,
-                "simulated": False,
-                "state": self.state,
-                "message": response,
-            }
-        except serial.SerialException as exc:  # pragma: no cover
-            return {
-                "ok": False,
-                "mode": self.mode,
-                "connected": False,
-                "simulated": True,
-                "state": self.state,
-                "message": f"Status read failed: {exc}",
-            }
-
-    def status_snapshot(self) -> dict[str, Any]:
-        return {
+    def status_snapshot(self, message: str | None = None) -> dict[str, Any]:
+        snapshot = {
             "mode": self.mode,
+            "port": self.port,
+            "baud": self.baud,
             "connected": self.connected,
             "simulation": self.mode == "simulation" or not self.connected,
             "state": self.state,
             "last_error": self.last_error,
         }
+        if message is not None:
+            snapshot["message"] = message
+        return snapshot
 
 
 hardware = ArduinoHardware()
