@@ -70,3 +70,4 @@ body { padding: 20px; }
 .toast.show { opacity: 1; transform: translateY(0); }
 
 @media (max-width: 980px) { .grid { grid-template-columns: 1fr; } .reminder-form { grid-template-columns: 1fr; } }
+
