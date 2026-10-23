@@ -60,6 +60,8 @@ function updateConnectionIndicators(status) {
 
   backendPill.classList.toggle('online', backendConnected);
   geminiPill.classList.toggle('online', geminiConnected);
+  geminiPill.classList.toggle('warn', !geminiConnected);
+  geminiPill.title = status.gemini ? status.gemini.message : 'Gemini status unavailable.';
   arduinoPill.classList.toggle('online', arduinoConnected);
   arduinoPill.classList.toggle('warn', !arduinoConnected && !simulationMode);
 

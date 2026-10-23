@@ -44,7 +44,7 @@ VIVA binds to this computer only by default. Do not expose it to a LAN or the pu
 ## Environment variables
 
 - `GEMINI_API_KEY`: your Gemini key
-- `GEMINI_MODEL`: use a free-tier model currently available to your key; current default is `gemini-3.8-flash` and should be verified in Google AI Studio
+- `GEMINI_MODEL`: use a model currently available to your API key; each API attempt has a 15-second timeout and temporary rate-limit, server, and connection errors are retried up to three times. VIVA displays setup-specific messages for key, model, and quota errors.
 - `HARDWARE_MODE`: `simulation`, `usb`, or `bluetooth`
 - `ARDUINO_PORT`: COM port for USB or paired HC-05 module
 - `ARDUINO_BAUD`: default `9600`
@@ -161,6 +161,7 @@ Colour estimates are approximate. Lighting, shadows, reflections, background col
 - `GEMINI_API_KEY not found`: add the key to `.env`
 - `429 Too Many Requests`: the free-tier quota was exhausted; wait and retry later
 - `Model not found`: the chosen model is not available for your key; check Google AI Studio
+- `Gemini timed out` or `Gemini is temporarily unavailable`: check your internet connection and try again; temporary API failures are retried automatically
 - `Arduino port not found`: check the COM port and cable/driver state
 - `Camera permission denied`: allow camera access in the browser
 - `Microphone permission denied`: allow use of the microphone in the browser
