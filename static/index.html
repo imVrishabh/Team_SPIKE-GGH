@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>VIVA</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="logo">V</div>
+          <h1>VIVA</h1>
+        </div>
+        <div class="status-row">
+          <div id="backend-pill" class="pill"><span class="dot"></span> Backend</div>
+          <div id="gemini-pill" class="pill"><span class="dot"></span> Gemini</div>
+          <div id="arduino-pill" class="pill"><span class="dot"></span> Arduino</div>
+          <div id="hardware-badge" class="pill simulation"><span class="dot"></span> SIMULATION MODE</div>
+        </div>
+      </header>
+
+      <main class="grid">
+        <section class="panel">
+          <h2>Voice + Command</h2>
+          <div class="command-area">
+            <button id="micBtn" class="icon-btn mic-btn" type="button" aria-label="Start listening">🎤</button>
+            <div class="command-box">
+              <input id="commandInput" type="text" placeholder="Say or type a command..." />
+            </div>
+            <button id="sendBtn" class="primary-btn" type="button">Send</button>
+          </div>
+
+          <div id="messageBox" class="message info">Ready for a command.</div>
+
+          <div class="light-controls">
+            <button id="lightOnBtn" class="light-toggle on" type="button">Bedroom Light ON</button>
+            <button id="lightOffBtn" class="light-toggle off" type="button">Bedroom Light OFF</button>
+            <div class="state-box">Current state<strong id="lightStateLabel">OFF</strong></div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Upcoming Reminders</h2>
+          <form id="reminderForm" class="reminder-form">
+            <input id="reminderMessage" type="text" placeholder="Reminder message" required />
+            <input id="reminderTime" type="text" placeholder="e.g. in one minute or tomorrow at 8 AM" required />
+            <button class="secondary-btn" type="submit">Add</button>
+          </form>
+          <ul id="reminderList" class="reminder-list"></ul>
+        </section>
+
+        <section class="panel">
+          <h2>Activity Log</h2>
+          <ul id="activityLog" class="activity-log"></ul>
+        </section>
+
+        <section class="panel camera-panel">
+          <h2>Camera</h2>
+          <video id="cameraVideo" autoplay playsinline muted></video>
+          <div class="capture-preview hidden">
+            <img id="cameraPreview" alt="Captured preview" />
+          </div>
+          <div class="camera-actions">
+            <button id="openCameraBtn" class="secondary-btn" type="button">Open Camera</button>
+            <button id="captureBtn" class="secondary-btn" type="button">Capture</button>
+            <button id="analyzeBtn" class="primary-btn" type="button">Describe Image</button>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="toast" class="toast"></div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
